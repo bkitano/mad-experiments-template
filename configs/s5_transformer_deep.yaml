@@ -1,0 +1,37 @@
+# S5 with Transformer - deeper model to test if depth helps
+# Usage: uv run modal run --detach -m train.modal_config --config configs/s5_transformer_deep.yaml
+
+dataset:
+  task: "s5"
+  max_k: 5
+  samples_per_k: 200_000
+  max_seq_len: 12
+  test_size: 0.2
+
+model:
+  type: "GroupTransformer"
+  num_layers: 4           # Deeper than baseline
+  nhead: 4
+  d_model: 128
+  dropout: 0.1
+  use_compile: true
+
+training:
+  batch_size: 2048
+  lr: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  op_eps: 1e-8
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  max_val_acc: 0.99
+  max_epochs_per_stage: 200
+
+logging:
+  wandb_project: "nc1-tc0-transformer-toy-experiments"
+  hf_repo_id: "bkitano/s5-transformer"
+
+deployment:
+  n_gpus: 1
+  gpu_type: "A100"
+  timeout_seconds: 28800

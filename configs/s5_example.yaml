@@ -1,0 +1,39 @@
+# Example experiment configuration for S5 (permutation composition)
+# Usage: uv run python -m train.launch --config configs/s5_example.yaml
+
+dataset:
+  task: "s5"  # "zn" for modular addition, "s5" for permutation composition
+  # S5 has 120 group elements (5! permutations), no modulus needed
+  max_k: 5              # Max sequence length (composition depth)
+  samples_per_k: 200_000
+  max_seq_len: 12
+  test_size: 0.2
+
+model:
+  type: "GroupDeltaNet"  # or "GroupTransformer"
+  num_layers: 1
+  nhead: 4              # Grazzi et al. use 4 heads for S5
+  d_model: 128
+  dropout: 0.1
+  use_compile: true
+  allow_neg_eigval: true  # Multiply beta by 2 for NC¹ expressivity
+
+training:
+  batch_size: 2048       # Grazzi et al. use 512 for S5
+  lr: 1e-4              # Grazzi et al. use 1e-4 for S5
+  beta1: 0.9
+  beta2: 0.999
+  op_eps: 1e-8
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  max_val_acc: 0.99
+  max_epochs_per_stage: 200
+
+logging:
+  wandb_project: "nc1-tc0-transformer-toy-experiments"
+  hf_repo_id: "bkitano/s5-transformer"
+
+deployment:
+  n_gpus: 1
+  gpu_type: "A100"
+  timeout_seconds: 28800

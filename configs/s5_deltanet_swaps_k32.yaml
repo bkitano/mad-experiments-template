@@ -1,0 +1,40 @@
+# S5 DeltaNet swaps-only with k=32 (test longer sequences)
+# Usage: uv run modal run --detach -m train.modal_config --config configs/s5_deltanet_swaps_k32.yaml
+
+dataset:
+  task: "s5"
+  max_k: 32
+  samples_per_k: 50_000
+  max_seq_len: 40
+  test_size: 0.2
+  generator_subset: "swaps"
+
+model:
+  type: "GroupDeltaNet"
+  num_layers: 1
+  nhead: 4
+  d_model: 128
+  dropout: 0.0
+  use_compile: true
+  allow_neg_eigval: true
+  use_short_conv: false
+
+training:
+  batch_size: 512
+  lr: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  op_eps: 1e-8
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  max_val_acc: 0.99
+  max_epochs_per_stage: 50
+
+logging:
+  wandb_project: "nc1-tc0-transformer-toy-experiments"
+  hf_repo_id: "bkitano/s5-deltanet"
+
+deployment:
+  n_gpus: 1
+  gpu_type: "A100"
+  timeout_seconds: 28800
