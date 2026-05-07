@@ -21,8 +21,7 @@ from huggingface_hub import HfApi, whoami
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models.deltanet import GroupDeltaNet
-from models.transformer import GroupTransformer
+from models import MODEL_REGISTRY
 from tasks.addition.dataset import ZnCurriculumDataset
 from tasks.addition.tokens import ZnTokenSystem
 from tasks.s5.dataset import S5CurriculumWrapper, S5FixedKDataset, _S5StageDataset
@@ -113,34 +112,29 @@ def create_curriculum(task: str, token_system: TokenSystemProtocol, dataset_conf
 
 
 def create_model(model_config: dict, token_system: TokenSystemProtocol) -> nn.Module:
-    """Create model based on config."""
+    """Create model based on config. Looks up model class from MODEL_REGISTRY."""
     model_type = model_config["type"]
 
-    if model_type == "GroupDeltaNet":
-        return GroupDeltaNet(
-            num_tokens=token_system.num_tokens,
-            num_classes=token_system.num_group_elements,
-            num_layers=model_config["num_layers"],
-            nhead=model_config["nhead"],
-            max_seq_len=model_config.get("max_seq_len", 12),
-            d_model=model_config["d_model"],
-            dropout=model_config.get("dropout", 0.1),
-            eos_idx=token_system.EOS_IDX,
-            allow_neg_eigval=model_config.get("allow_neg_eigval", False),
-            use_short_conv=model_config.get("use_short_conv", True),
+    if model_type not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model type: {model_type}. "
+            f"Available: {list(MODEL_REGISTRY.keys())}. "
+            f"Register new models in models/__init__.py."
         )
-    elif model_type == "GroupTransformer":
-        return GroupTransformer(
-            num_tokens=token_system.num_tokens,
-            num_classes=token_system.num_group_elements,
-            max_seq_len=model_config.get("max_seq_len", 12),
-            d_model=model_config["d_model"],
-            nhead=model_config["nhead"],
-            num_layers=model_config["num_layers"],
-            dropout=model_config.get("dropout", 0.1),
-        )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
+
+    model_cls = MODEL_REGISTRY[model_type]
+
+    # Pass standard args + any extra kwargs from config
+    standard_keys = {"type", "use_compile", "num_tokens", "num_classes", "max_seq_len"}
+    extra_kwargs = {k: v for k, v in model_config.items() if k not in standard_keys}
+
+    return model_cls(
+        num_tokens=token_system.num_tokens,
+        num_classes=token_system.num_group_elements,
+        eos_idx=token_system.EOS_IDX,
+        max_seq_len=model_config.get("max_seq_len", 512),
+        **extra_kwargs,
+    )
 
 
 # =============================================================================
