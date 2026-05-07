@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import tempfile
+import time
 from typing import Protocol
 
 import torch
@@ -148,6 +149,8 @@ def create_model(model_config: dict, token_system: TokenSystemProtocol) -> nn.Mo
 
 
 def main():
+    start_time = time.time()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     args = parser.parse_args()
@@ -390,6 +393,35 @@ def main():
         f"Loss: {final_loss:.4f}, Accuracy: {final_accuracy:.4f}"
     )
     print(f"Per-k accuracy: {final_k_accuracy}")
+
+    # Write results.json for harness evaluation
+    if accelerator.is_main_process:
+        # Count parameters (unwrap compiled model if needed)
+        raw_model = model
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+        if hasattr(raw_model, "module"):
+            raw_model = raw_model.module
+        param_count = sum(p.numel() for p in raw_model.parameters())
+
+        results_dict = {
+            "task": task,
+            "val/accuracy": final_accuracy,
+            "val/loss": final_loss,
+            "param_count": param_count,
+            "wall_time_seconds": time.time() - start_time,
+            "global_step": global_step,
+        }
+        for k, acc in final_k_accuracy.items():
+            results_dict[f"val/accuracy_k{k}"] = acc
+
+        results_path = os.path.join(os.path.dirname(args.config), "..", "results.json")
+        results_path = os.path.normpath(results_path)
+        # Also write to workspace root for harness evaluate.py
+        for path in [results_path, "results.json"]:
+            with open(path, "w") as f:
+                json.dump(results_dict, f, indent=2)
+        print(f"\nResults written to results.json")
 
     # Log final test metrics to wandb
     if accelerator.is_main_process:
