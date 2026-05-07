@@ -535,21 +535,208 @@ class S5CurriculumWrapper:
         return train_ds, test_ds
 
 
+# =============================================================================
+# Harness functions — uniform data generation and scoring
+# =============================================================================
+
+IGNORE_INDEX = _S5StageDataset.IGNORE_INDEX
+
+
+def _resolve_subset(ts: S5TokenSystem, subset: Optional[str]) -> Optional[list[int]]:
+    if subset == "swaps":
+        return ts.get_swap_indices()
+    elif subset == "3perm":
+        return ts.get_3perm_indices()
+    return None
+
+
+def generate_train_data(
+    token_system: S5TokenSystem,
+    max_k: int,
+    samples_per_k: int,
+    max_seq_len: int,
+    generator_subset: Optional[str] = None,
+    stage: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> dict[str, torch.Tensor]:
+    """Generate curriculum training data with scan targets.
+
+    Returns dict with keys: tokens, targets, masks, ks.
+    All tensors have shape (N, max_seq_len) except ks which is (N,).
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    available = _resolve_subset(token_system, generator_subset) or list(
+        range(token_system.num_group_elements)
+    )
+    k_range = range(1, (stage or max_k) + 1)
+
+    all_tokens = []
+    all_targets = []
+    all_masks = []
+    all_ks = []
+
+    for k in k_range:
+        for _ in range(samples_per_k):
+            elements = [random.choice(available) for _ in range(k)]
+            scan = token_system.scan_sequence(elements)
+
+            tokens = torch.full((max_seq_len,), token_system.PAD_IDX, dtype=torch.long)
+            target = torch.full((max_seq_len,), IGNORE_INDEX, dtype=torch.long)
+            mask = torch.zeros(max_seq_len, dtype=torch.float)
+
+            tokens[0] = token_system.BOS_IDX
+            mask[0] = 1.0
+            for i, (tok, scan_val) in enumerate(zip(elements, scan)):
+                tokens[i + 1] = tok
+                target[i + 1] = scan_val
+                mask[i + 1] = 1.0
+            eos_pos = len(elements) + 1
+            tokens[eos_pos] = token_system.EOS_IDX
+            mask[eos_pos] = 1.0
+
+            all_tokens.append(tokens)
+            all_targets.append(target)
+            all_masks.append(mask)
+            all_ks.append(k)
+
+    indices = list(range(len(all_tokens)))
+    random.shuffle(indices)
+
+    return {
+        "tokens": torch.stack([all_tokens[i] for i in indices]),
+        "targets": torch.stack([all_targets[i] for i in indices]),
+        "masks": torch.stack([all_masks[i] for i in indices]),
+        "ks": torch.tensor([all_ks[i] for i in indices], dtype=torch.long),
+    }
+
+
+def generate_eval_data(
+    token_system: S5TokenSystem,
+    lengths: list[int],
+    samples_per_length: int,
+    max_seq_len: int,
+    generator_subset: Optional[str] = None,
+    seed: Optional[int] = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Generate OOD eval data — inputs WITHOUT labels.
+
+    Returns:
+        inputs: dict with tokens, masks, ks (no targets)
+        held_out: dict with targets, ks (for scoring)
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    available = _resolve_subset(token_system, generator_subset) or list(
+        range(token_system.num_group_elements)
+    )
+
+    all_tokens = []
+    all_targets = []
+    all_masks = []
+    all_ks = []
+
+    for k in lengths:
+        assert k + 2 <= max_seq_len, f"length {k} + 2 > max_seq_len {max_seq_len}"
+        for _ in range(samples_per_length):
+            elements = [random.choice(available) for _ in range(k)]
+            scan = token_system.scan_sequence(elements)
+
+            tokens = torch.full((max_seq_len,), token_system.PAD_IDX, dtype=torch.long)
+            target = torch.full((max_seq_len,), IGNORE_INDEX, dtype=torch.long)
+            mask = torch.zeros(max_seq_len, dtype=torch.float)
+
+            tokens[0] = token_system.BOS_IDX
+            mask[0] = 1.0
+            for i, (tok, scan_val) in enumerate(zip(elements, scan)):
+                tokens[i + 1] = tok
+                target[i + 1] = scan_val
+                mask[i + 1] = 1.0
+            eos_pos = len(elements) + 1
+            tokens[eos_pos] = token_system.EOS_IDX
+            mask[eos_pos] = 1.0
+
+            all_tokens.append(tokens)
+            all_targets.append(target)
+            all_masks.append(mask)
+            all_ks.append(k)
+
+    inputs = {
+        "tokens": torch.stack(all_tokens),
+        "masks": torch.stack(all_masks),
+        "ks": torch.tensor(all_ks, dtype=torch.long),
+    }
+    held_out = {
+        "targets": torch.stack(all_targets),
+        "ks": torch.tensor(all_ks, dtype=torch.long),
+    }
+    return inputs, held_out
+
+
+def score_predictions(
+    held_out: dict[str, torch.Tensor],
+    predictions: dict[str, list[list[int]]],
+) -> list[dict]:
+    """Score predictions against held-out targets.
+
+    Args:
+        held_out: targets and ks tensors from generate_eval_data
+        predictions: {str(length): [[pred at each position], ...]}
+
+    Returns:
+        list of {length, accuracy, num_samples, num_correct}
+    """
+    targets = held_out["targets"]
+    ks = held_out["ks"]
+
+    results = []
+    for length in sorted(set(ks.tolist())):
+        length_str = str(length)
+        length_mask = ks == length
+        length_targets = targets[length_mask]
+        n_samples = length_targets.shape[0]
+
+        if length_str not in predictions:
+            results.append({"length": length, "accuracy": 0.0, "num_samples": 0, "num_correct": 0})
+            continue
+
+        preds_list = predictions[length_str]
+        if len(preds_list) != n_samples:
+            results.append({"length": length, "accuracy": 0.0, "num_samples": n_samples, "num_correct": 0})
+            continue
+
+        preds_tensor = torch.tensor(preds_list, dtype=torch.long)
+        valid = length_targets != IGNORE_INDEX
+        correct = ((preds_tensor == length_targets) & valid).sum().item()
+        total = valid.sum().item()
+
+        results.append({
+            "length": length,
+            "accuracy": correct / total if total > 0 else 0.0,
+            "num_samples": n_samples,
+            "num_correct": int(correct),
+        })
+
+    return results
+
+
 if __name__ == "__main__":
     from tasks.s5.tokens import S5TokenSystem
 
     token_system = S5TokenSystem()
-    dataset = S5CurriculumDataset(token_system, max_k=5, samples_per_k=10_000, max_seq_len=512)
 
-    train_dataset, test_dataset = dataset.train_test_split(test_size=0.2)
-    print(len(train_dataset))
-    print(len(test_dataset))
-    tokens, target, mask, k = train_dataset[0]
-    print(tokens)
-    print(target)
-    print(mask)
+    # Test generate_train_data
+    train = generate_train_data(token_system, max_k=3, samples_per_k=100, max_seq_len=32, seed=42)
+    print(f"Train: {train['tokens'].shape}")
 
-    tokens, target, mask, k = test_dataset[0]
-    print(tokens)
-    print(target)
-    print(mask)
+    # Test generate_eval_data
+    inputs, held_out = generate_eval_data(token_system, lengths=[5, 10], samples_per_length=50, max_seq_len=32, seed=42)
+    print(f"Eval: {inputs['tokens'].shape}, no targets: {'targets' not in inputs}")
+
+    # Test scoring with perfect predictions
+    preds = {str(k): held_out["targets"][held_out["ks"] == k].tolist() for k in [5, 10]}
+    results = score_predictions(held_out, preds)
+    for r in results:
+        print(f"  k={r['length']}: accuracy={r['accuracy']:.4f}")
