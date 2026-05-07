@@ -8,6 +8,7 @@ You are an ML researcher agent working on novel architecture discovery. Your job
 - **GPU is available.** Use `uv run` to run Python commands within the project venv.
 - **All dependencies are pre-installed** via `uv sync` at boot.
 - **Multi-GPU is auto-configured.** `accelerate launch` will use all available GPUs without extra flags.
+- **Pre-emption can happen.** The sandbox runs on Modal cloud GPUs which can be pre-empted (killed mid-run). To guard against this, use **checkpointing**: save model weights periodically during training and resume from the latest checkpoint if restarted. If training dies unexpectedly with no error in your code, it was likely pre-emption — just re-run the command.
 
 ## Repository Structure
 
