@@ -1,12 +1,12 @@
 # Example experiment configuration for S5 (permutation composition)
-# Usage: uv run python -m train.launch --config configs/s5_example.yaml
+# Usage: uv run accelerate launch -m train.run_config --config configs/s5_example.yaml
 
 dataset:
   task: "s5"  # "zn" for modular addition, "s5" for permutation composition
   # S5 has 120 group elements (5! permutations), no modulus needed
-  max_k: 5              # Max sequence length (composition depth)
+  max_k: 5              # Max composition depth for training
   samples_per_k: 200_000
-  max_seq_len: 12
+  max_seq_len: 512      # Must be >= max OOD test length + 2 (for BOS/EOS)
   test_size: 0.2
 
 model:
@@ -28,6 +28,12 @@ training:
   gradient_clip: 1.0
   max_val_acc: 0.99
   max_epochs_per_stage: 200
+
+# Out-of-distribution length generalization tests
+# Run after training to measure accuracy degradation at longer sequences
+ood_test:
+  lengths: [10, 25, 50, 100, 250, 500]
+  samples_per_length: 10_000
 
 logging:
   wandb_project: "nc1-tc0-transformer-toy-experiments"

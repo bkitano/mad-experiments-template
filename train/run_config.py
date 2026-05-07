@@ -25,7 +25,7 @@ from models.deltanet import GroupDeltaNet
 from models.transformer import GroupTransformer
 from tasks.addition.dataset import ZnCurriculumDataset
 from tasks.addition.tokens import ZnTokenSystem
-from tasks.s5.dataset import S5CurriculumWrapper
+from tasks.s5.dataset import S5CurriculumWrapper, S5FixedKDataset, _S5StageDataset
 from tasks.s5.tokens import S5TokenSystem
 from train.train import evaluate, train_epoch
 
@@ -394,7 +394,78 @@ def main():
     )
     print(f"Per-k accuracy: {final_k_accuracy}")
 
+    # =========================================================================
+    # Out-of-distribution length generalization evaluation
+    # =========================================================================
+    ood_config = config.get("ood_test", {})
+    ood_lengths = ood_config.get("lengths", [])
+    ood_samples = ood_config.get("samples_per_length", 10_000)
+    ood_results = {}
+
+    if ood_lengths and task == "s5":
+        max_seq_len = dataset_config["max_seq_len"]
+        max_ood_k = max(ood_lengths)
+        if max_ood_k + 2 > max_seq_len:
+            print(
+                f"\nWARNING: max OOD length {max_ood_k} + 2 > max_seq_len {max_seq_len}. "
+                f"Skipping OOD lengths that exceed max_seq_len."
+            )
+            ood_lengths = [k for k in ood_lengths if k + 2 <= max_seq_len]
+
+        print(f"\n{'='*50}")
+        print(f"OOD Length Generalization (trained at k<={dataset_config['max_k']})")
+        print(f"{'='*50}")
+
+        # Determine generator subset to match training distribution
+        gen_subset_name = dataset_config.get("generator_subset", None)
+        if gen_subset_name == "swaps":
+            gen_subset = token_system.get_swap_indices()
+        elif gen_subset_name == "3perm":
+            gen_subset = token_system.get_3perm_indices()
+        else:
+            gen_subset = None
+
+        for test_k in sorted(ood_lengths):
+            # Generate OOD test data at this length
+            ood_dataset = S5FixedKDataset(
+                token_system=token_system,
+                k=test_k,
+                num_samples=ood_samples,
+                max_seq_len=max_seq_len,
+                generator_subset=gen_subset,
+            )
+            # Wrap in _S5StageDataset for scan-format targets (matching training)
+            ood_data = []
+            for tokens_list, _result in ood_dataset.data:
+                scan = token_system.scan_sequence(tokens_list)
+                ood_data.append((tokens_list, scan, test_k))
+            ood_stage = _S5StageDataset(token_system, max_seq_len, ood_data)
+
+            ood_loader = DataLoader(
+                ood_stage, batch_size=train_config["batch_size"], shuffle=False
+            )
+            ood_loader = accelerator.prepare(ood_loader)
+
+            ood_loss, ood_acc, ood_k_acc = evaluate(
+                model, ood_loader, criterion,
+                device=accelerator.device, accelerator=accelerator,
+            )
+            ood_results[test_k] = {"accuracy": ood_acc, "loss": ood_loss}
+            print(f"  k={test_k:>4d}: accuracy={ood_acc:.4f}  loss={ood_loss:.4f}")
+
+        # Print degradation summary
+        if ood_results:
+            print(f"\n  In-distribution (k<={dataset_config['max_k']}): {final_accuracy:.4f}")
+            print(f"  {'Length':>8s}  {'Accuracy':>10s}  {'Degradation':>12s}")
+            print(f"  {'-'*8}  {'-'*10}  {'-'*12}")
+            for k in sorted(ood_results):
+                acc = ood_results[k]["accuracy"]
+                degradation = final_accuracy - acc
+                print(f"  {k:>8d}  {acc:>10.4f}  {degradation:>+12.4f}")
+
+    # =========================================================================
     # Write results.json for harness evaluation
+    # =========================================================================
     if accelerator.is_main_process:
         # Count parameters (unwrap compiled model if needed)
         raw_model = model
@@ -411,14 +482,21 @@ def main():
             "param_count": param_count,
             "wall_time_seconds": time.time() - start_time,
             "global_step": global_step,
+            "train_max_k": dataset_config["max_k"],
         }
         for k, acc in final_k_accuracy.items():
             results_dict[f"val/accuracy_k{k}"] = acc
 
-        results_path = os.path.join(os.path.dirname(args.config), "..", "results.json")
-        results_path = os.path.normpath(results_path)
-        # Also write to workspace root for harness evaluate.py
-        for path in [results_path, "results.json"]:
+        # OOD length generalization results
+        if ood_results:
+            results_dict["ood"] = {}
+            for k, metrics in sorted(ood_results.items()):
+                results_dict["ood"][str(k)] = metrics
+                results_dict[f"ood/accuracy_k{k}"] = metrics["accuracy"]
+                results_dict[f"ood/loss_k{k}"] = metrics["loss"]
+
+        # Write to workspace root for harness evaluate.py
+        for path in ["results.json"]:
             with open(path, "w") as f:
                 json.dump(results_dict, f, indent=2)
         print(f"\nResults written to results.json")
@@ -431,6 +509,9 @@ def main():
         }
         for k, acc in final_k_accuracy.items():
             log_dict[f"test/accuracy_k{k}"] = acc
+        for k, metrics in ood_results.items():
+            log_dict[f"ood/accuracy_k{k}"] = metrics["accuracy"]
+            log_dict[f"ood/loss_k{k}"] = metrics["loss"]
         wandb.log(log_dict)
         wandb.finish()
 
