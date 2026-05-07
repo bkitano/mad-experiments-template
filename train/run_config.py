@@ -1,6 +1,10 @@
 """
 Config-based training script supporting multiple tasks (Zn, S5).
 
+Supports automatic checkpointing and resume after pre-emption.
+Checkpoints are saved to ./checkpoints/ (on the Modal Volume) after every
+epoch. On restart, training resumes from the latest checkpoint automatically.
+
 Usage:
     uv run accelerate launch -m train.run_config --config configs/example.yaml
 """
@@ -8,8 +12,10 @@ Usage:
 import argparse
 import json
 import os
+import signal
 import tempfile
 import time
+from pathlib import Path
 from typing import Protocol
 
 import torch
@@ -27,6 +33,9 @@ from tasks.addition.tokens import ZnTokenSystem
 from tasks.s5.dataset import S5CurriculumWrapper, S5FixedKDataset, _S5StageDataset
 from tasks.s5.tokens import S5TokenSystem
 from train.train import evaluate, train_epoch
+
+CHECKPOINT_DIR = Path("checkpoints")
+CHECKPOINT_META = CHECKPOINT_DIR / "meta.json"
 
 
 # =============================================================================
@@ -138,6 +147,39 @@ def create_model(model_config: dict, token_system: TokenSystemProtocol) -> nn.Mo
 
 
 # =============================================================================
+# Checkpointing
+# =============================================================================
+
+
+def save_checkpoint(accelerator, stage, epoch, global_step, wandb_run_id, start_time):
+    """Save model/optimizer state and training metadata to disk."""
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    accelerator.save_state(str(CHECKPOINT_DIR))
+    if accelerator.is_main_process:
+        meta = {
+            "stage": stage,
+            "epoch": epoch,
+            "global_step": global_step,
+            "wandb_run_id": wandb_run_id,
+            "wall_time_seconds": time.time() - start_time,
+        }
+        with open(CHECKPOINT_META, "w") as f:
+            json.dump(meta, f, indent=2)
+    accelerator.wait_for_everyone()
+
+
+def load_checkpoint_meta():
+    """Load checkpoint metadata if it exists. Returns dict or None."""
+    if CHECKPOINT_META.exists():
+        with open(CHECKPOINT_META) as f:
+            meta = json.load(f)
+        print(f"Found checkpoint: stage={meta['stage']}, epoch={meta['epoch']}, "
+              f"global_step={meta['global_step']}")
+        return meta
+    return None
+
+
+# =============================================================================
 # Main Training Function
 # =============================================================================
 
@@ -183,23 +225,33 @@ def main():
     # Setup accelerator
     accelerator = Accelerator(mixed_precision="fp16" if torch.cuda.is_available() else "no")
 
+    # Check for existing checkpoint to resume from
+    ckpt_meta = load_checkpoint_meta()
+    resumed = ckpt_meta is not None
+
     wandb_run_id = None
     wandb_run_name = None
     wandb_run_url = None
 
-    # Initialize wandb on main process
+    # Initialize wandb on main process (resume if checkpoint has a run ID)
     if accelerator.is_main_process:
         wandb_project = logging_config.get("wandb_project", "nc1-tc0-transformer-toy-experiments")
-        wandb_run = wandb.init(
-            project=wandb_project,
-            name=build_wandb_name(task, dataset_config, model_config, train_config),
-            config={
+        wandb_kwargs = {
+            "project": wandb_project,
+            "name": build_wandb_name(task, dataset_config, model_config, train_config),
+            "config": {
                 "task": task,
                 "dataset": dataset_config,
                 "model": model_config,
                 "train": train_config,
             },
-        )
+        }
+        if resumed and ckpt_meta.get("wandb_run_id"):
+            wandb_kwargs["id"] = ckpt_meta["wandb_run_id"]
+            wandb_kwargs["resume"] = "allow"
+            print(f"Resuming wandb run {ckpt_meta['wandb_run_id']}")
+
+        wandb_run = wandb.init(**wandb_kwargs)
         wandb_run_id = wandb_run.id
         wandb_run_name = wandb_run.name
         wandb_run_url = wandb_run.url
@@ -218,6 +270,28 @@ def main():
     model, optimizer = accelerator.prepare(model, optimizer)
 
     global_step = 0
+    resume_stage = 0
+    resume_epoch = 0
+
+    # Restore model/optimizer state and training progress from checkpoint
+    if resumed:
+        print(f"Restoring model/optimizer from {CHECKPOINT_DIR}")
+        accelerator.load_state(str(CHECKPOINT_DIR))
+        global_step = ckpt_meta["global_step"]
+        resume_stage = ckpt_meta["stage"]
+        resume_epoch = ckpt_meta["epoch"]
+        start_time = time.time() - ckpt_meta.get("wall_time_seconds", 0)
+        print(f"Resumed: global_step={global_step}, stage={resume_stage}, epoch={resume_epoch}")
+
+    # Register SIGTERM handler to save checkpoint on pre-emption
+    def _sigterm_handler(signum, frame):
+        print("\nSIGTERM received — saving emergency checkpoint...")
+        save_checkpoint(accelerator, resume_stage, resume_epoch, global_step,
+                        wandb_run_id, start_time)
+        print("Emergency checkpoint saved.")
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     # Check if curriculum mode is enabled (default: True)
     use_curriculum = dataset_config.get("curriculum", True)
@@ -250,6 +324,10 @@ def main():
         gradient_clip = train_config.get("gradient_clip", 1.0)
 
         for epoch in tqdm(range(max_epochs), desc=f"k={train_k}"):
+            # Skip epochs already completed before checkpoint
+            if resumed and epoch < resume_epoch:
+                continue
+
             loss, accuracy = train_epoch(
                 model,
                 train_loader,
@@ -286,6 +364,10 @@ def main():
 
                 wandb.log(log_dict)
 
+            # Save checkpoint after every epoch
+            save_checkpoint(accelerator, 0, epoch + 1, global_step,
+                            wandb_run_id, start_time)
+
             # Check if we've reached target accuracy
             if max_val_acc is not None and val_accuracy >= max_val_acc:
                 print(
@@ -296,6 +378,10 @@ def main():
     else:
         # Curriculum training: iterate through stages
         for stage in range(1, curriculum.num_stages() + 1):
+            # Skip stages already completed before checkpoint
+            if resumed and stage < resume_stage:
+                continue
+
             print(f"\n{'='*50}")
             print(f"Curriculum Stage {stage}: k=1 to k={stage}")
             print(f"{'='*50}")
@@ -320,6 +406,10 @@ def main():
             gradient_clip = train_config.get("gradient_clip", 1.0)
 
             for epoch in tqdm(range(max_epochs), desc=f"Stage {stage}"):
+                # Skip epochs already completed in the resumed stage
+                if resumed and stage == resume_stage and epoch < resume_epoch:
+                    continue
+
                 loss, accuracy = train_epoch(
                     model,
                     train_loader,
@@ -355,6 +445,10 @@ def main():
                         log_dict[f"val/accuracy_k{k}"] = acc
 
                     wandb.log(log_dict)
+
+                # Save checkpoint after every epoch
+                save_checkpoint(accelerator, stage, epoch + 1, global_step,
+                                wandb_run_id, start_time)
 
                 # Check if we've reached target accuracy for this stage
                 if max_val_acc is not None and val_accuracy >= max_val_acc:
