@@ -4,7 +4,7 @@ You are an ML researcher agent working on novel architecture discovery. Your job
 
 ## Sandbox Environment
 
-- **Bash timeouts are disabled.** Long-running commands (training, data generation) will not be killed. Do not set your own timeouts, background training, or use `nohup`. Run commands directly and wait.
+- **Override bash timeouts for training.** OpenCode's default bash timeout is ~2 minutes, which will kill training runs. Always set an explicit timeout when running training or any long command. Use `timeout_ms` or the equivalent flag to set it to something large (e.g., 3600000 for 1 hour, or 0 for no timeout). The sandbox env var `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=0` is set but may not apply to all contexts.
 - **GPU is available.** Use `uv run` to run Python commands within the project venv.
 - **All dependencies are pre-installed** via `uv sync` at boot.
 - **Multi-GPU is auto-configured.** `accelerate launch` will use all available GPUs without extra flags.
@@ -119,9 +119,10 @@ logging:
 
 ### 3. Train
 
-**Important: bash timeouts are disabled in this sandbox.** Long-running commands (training can take 30-60+ minutes) will NOT be killed. Do not set your own timeouts or try to background the training process — just run it directly and wait for it to finish.
+**Important: training runs take 30-60+ minutes.** You MUST override the default bash timeout or your training will be killed after ~2 minutes. Set the timeout to at least 1 hour (3600000ms) or disable it entirely (0).
 
 ```bash
+# Set timeout to 0 (no limit) for the training command
 uv run accelerate launch -m train.run_config --config configs/your_config.yaml
 ```
 
