@@ -116,6 +116,53 @@ ood_test:
   samples_per_length: 10_000
 ```
 
+## Training Pipeline (`train/run_config.py`)
+
+The harness runner is `train/run_config.py`. It's config-driven — one YAML file controls the entire run.
+
+```bash
+uv run accelerate launch -m train.run_config --config configs/s5_example.yaml
+```
+
+### What it does, step by step
+
+**1. Setup** — loads config, creates the token system (S5 or Zn), builds the curriculum dataset, instantiates the model from `MODEL_REGISTRY`, sets up AdamW optimizer and HuggingFace Accelerator (handles GPU, fp16, multi-GPU).
+
+**2. Curriculum training** — trains in stages, starting easy and increasing difficulty:
+
+- Stage 1: sequences of length k=1 only
+- Stage 2: sequences of length k=1 and k=2, mixed
+- Stage 3: k=1, k=2, k=3, mixed
+- ...up to `max_k`
+
+Each stage trains for up to `max_epochs_per_stage` epochs, with early stopping when `val_accuracy >= max_val_acc` (default 0.99). The model carries over weights between stages — it doesn't reset.
+
+The training target at each position is the **scan** (prefix composition): given `[BOS, g1, g2, g3, EOS]`, the targets are `[IGNORE, g1, g1*g2, g1*g2*g3, IGNORE]`. The model learns to predict the running product at every position, not just the final answer. Positions with `IGNORE_INDEX=-100` are excluded from the loss.
+
+Alternatively, set `curriculum: false` and `fixed_k: N` in the config to train at a single sequence length without curriculum.
+
+**3. In-distribution evaluation** — after all curriculum stages complete, evaluates on a held-out test set at the same lengths used during training. Reports final accuracy and per-k accuracy breakdown.
+
+**4. OOD length generalization** — if `ood_test` is present in the config, generates fresh test data at each specified length (e.g., k=10, 25, 50, 100, 250, 500) using `S5FixedKDataset`. Evaluates the trained model on each length and prints a degradation table showing how accuracy drops as sequence length increases beyond training distribution.
+
+**5. Results output** — writes `results.json` with all metrics (in-distribution accuracy, OOD accuracy per length, parameter count, wall time). Also logs everything to W&B.
+
+### Key files
+
+| File | Role |
+|------|------|
+| `train/run_config.py` | Main entry point — config parsing, curriculum loop, OOD eval, results output |
+| `train/train.py` | `train_epoch()` and `evaluate()` — the actual forward/backward/accuracy logic |
+| `train/launch.py` | Modal launcher (spawns `run_config.py` on cloud GPU) |
+
+### Training details
+
+- **Optimizer**: AdamW with configurable lr, betas, weight decay
+- **Loss**: CrossEntropyLoss with `ignore_index=-100` (ignores BOS, EOS, PAD positions)
+- **Gradient clipping**: configurable, default 1.0
+- **Mixed precision**: fp16 on CUDA, no mixed precision on CPU/MPS
+- **Model compilation**: optional `torch.compile` via `use_compile: true` in config
+
 ## Data Generation API
 
 For custom training loops or analysis, use the harness functions directly:
