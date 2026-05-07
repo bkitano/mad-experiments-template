@@ -153,7 +153,6 @@ Alternatively, set `curriculum: false` and `fixed_k: N` in the config to train a
 |------|------|
 | `train/run_config.py` | Main entry point — config parsing, curriculum loop, OOD eval, results output |
 | `train/train.py` | `train_epoch()` and `evaluate()` — the actual forward/backward/accuracy logic |
-| `train/launch.py` | Modal launcher (spawns `run_config.py` on cloud GPU) |
 
 ### Training details
 
