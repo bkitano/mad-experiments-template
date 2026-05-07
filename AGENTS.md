@@ -115,7 +115,7 @@ logging:
 uv run accelerate launch -m train.run_config --config configs/your_config.yaml
 ```
 
-This will:
+This uses all available GPUs automatically (the sandbox generates an accelerate config at boot). It will:
 - Train with curriculum (k=1, then k=1..2, then k=1..3, etc.)
 - Evaluate in-distribution after training
 - Run OOD length generalization at each length in `ood_test.lengths`
