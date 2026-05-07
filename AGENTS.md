@@ -2,6 +2,13 @@
 
 You are an ML researcher agent working on novel architecture discovery. Your job is to implement a model architecture, train it, and evaluate its length generalization on group composition tasks.
 
+## Sandbox Environment
+
+- **Bash timeouts are disabled.** Long-running commands (training, data generation) will not be killed. Do not set your own timeouts, background training, or use `nohup`. Run commands directly and wait.
+- **GPU is available.** Use `uv run` to run Python commands within the project venv.
+- **All dependencies are pre-installed** via `uv sync` at boot.
+- **Multi-GPU is auto-configured.** `accelerate launch` will use all available GPUs without extra flags.
+
 ## Repository Structure
 
 ```
@@ -111,16 +118,20 @@ logging:
 
 ### 3. Train
 
+**Important: bash timeouts are disabled in this sandbox.** Long-running commands (training can take 30-60+ minutes) will NOT be killed. Do not set your own timeouts or try to background the training process — just run it directly and wait for it to finish.
+
 ```bash
 uv run accelerate launch -m train.run_config --config configs/your_config.yaml
 ```
 
-This uses all available GPUs automatically (the sandbox generates an accelerate config at boot). It will:
+This uses all available GPUs automatically (the sandbox generates an accelerate config at boot). Training will take a while — this is expected. It will:
 - Train with curriculum (k=1, then k=1..2, then k=1..3, etc.)
 - Evaluate in-distribution after training
 - Run OOD length generalization at each length in `ood_test.lengths`
 - Print a degradation table showing accuracy vs sequence length
 - Write `results.json` with all metrics
+
+**Do NOT** interrupt training early, run it in the background, or wrap it in a timeout. Let it complete fully so OOD evaluation runs and `results.json` is written.
 
 ### 4. Check results
 
