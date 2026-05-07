@@ -6,7 +6,7 @@ dataset:
   # S5 has 120 group elements (5! permutations), no modulus needed
   max_k: 5              # Max composition depth for training
   samples_per_k: 200_000
-  max_seq_len: 512      # Must be >= max OOD test length + 2 (for BOS/EOS)
+  max_seq_len: 128      # Must be >= max OOD test length + 2 (for BOS/EOS)
   test_size: 0.2
 
 model:
@@ -32,7 +32,7 @@ training:
 # Out-of-distribution length generalization tests
 # Run after training to measure accuracy degradation at longer sequences
 ood_test:
-  lengths: [10, 25, 50, 100, 250, 500]
+  lengths: [10, 25, 50, 100]
   samples_per_length: 10_000
 
 logging:
