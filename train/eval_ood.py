@@ -63,6 +63,7 @@ def main():
     accelerator = Accelerator(mixed_precision="fp16" if torch.cuda.is_available() else "no")
 
     # Create and load model
+    model_config["max_seq_len"] = dataset_config["max_seq_len"]
     model = create_model(model_config, token_system)
     if model_config.get("use_compile", False) and hasattr(torch, "compile"):
         model = torch.compile(model)
