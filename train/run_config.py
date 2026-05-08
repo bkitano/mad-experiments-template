@@ -189,6 +189,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
+    parser.add_argument("--fresh", action="store_true", help="Ignore existing checkpoints and train from scratch")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -226,7 +227,11 @@ def main():
     accelerator = Accelerator(mixed_precision="fp16" if torch.cuda.is_available() else "no")
 
     # Check for existing checkpoint to resume from
-    ckpt_meta = load_checkpoint_meta()
+    if args.fresh:
+        print("--fresh: ignoring existing checkpoints, training from scratch")
+        ckpt_meta = None
+    else:
+        ckpt_meta = load_checkpoint_meta()
     resumed = ckpt_meta is not None
 
     wandb_run_id = None
