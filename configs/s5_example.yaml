@@ -4,6 +4,7 @@
 dataset:
   task: "s5"  # "zn" for modular addition, "s5" for permutation composition
   # S5 has 120 group elements (5! permutations), no modulus needed
+  generator_subset: "swaps"    # or "3perm", or omit for full S5
   max_k: 5              # Max composition depth for training
   samples_per_k: 200_000
   max_seq_len: 64       # Must be >= max OOD test length + 2 (for BOS/EOS)
@@ -39,7 +40,3 @@ logging:
   wandb_project: "nc1-tc0-transformer-toy-experiments"
   hf_repo_id: "bkitano/s5-transformer"
 
-deployment:
-  n_gpus: 1
-  gpu_type: "A100"
-  timeout_seconds: 28800
